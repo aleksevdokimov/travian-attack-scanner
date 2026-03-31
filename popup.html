@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <style>
+        body {
+            width: 160px; /* Увеличил ширину для двух кнопок */
+            padding: 12px;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: #111827;
+            color: #f3f4f6;
+            margin: 0;
+            font-size: 12px;
+        }
+        
+        .container {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        
+        .header {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            margin-bottom: 5px;
+            gap: 8px;
+        }
+        
+        .status-indicator {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            transition: all 0.3s;
+            flex-shrink: 0;
+            margin-top: 3px;
+        }
+        
+        .status-message {
+            flex: 1;
+            padding: 4px 6px;
+            border-radius: 4px;
+            font-size: 10px;
+            text-align: center;
+            animation: fadeIn 0.3s;
+            min-height: 20px;
+            height: auto;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            line-height: 1.3;
+            background: rgba(59, 130, 246, 0.1);
+            color: #3b82f6;
+            border: 1px solid rgba(59, 130, 246, 0.2);
+            word-break: break-word;
+            overflow: hidden;
+            box-sizing: border-box;
+        }
+        
+        .controls-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            width: 100%;
+        }
+        
+        .buttons-container {
+            display: flex;
+            gap: 6px;
+            flex: 2;
+        }
+        
+        .scan-button {
+            flex: 1;
+            padding: 5px 6px;
+            background: linear-gradient(135deg, #10b981, #059669);
+            color: white;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 10px;
+            font-weight: 600;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 3px;
+            height: 28px;
+            min-height: 28px;
+            box-sizing: border-box;
+            white-space: nowrap;
+        }
+        
+        #scanBtn {
+            background: linear-gradient(135deg, #10b981, #059669);
+        }
+        
+        #rallyScanBtn {
+            background: linear-gradient(135deg, #8b5cf6, #7c3aed);
+        }
+        
+        .scan-button:hover:not(:disabled) {
+            transform: translateY(-1px);
+        }
+        
+        #scanBtn:hover:not(:disabled) {
+            background: linear-gradient(135deg, #059669, #047857);
+        }
+        
+        #rallyScanBtn:hover:not(:disabled) {
+            background: linear-gradient(135deg, #7c3aed, #6d28d9);
+        }
+        
+        .scan-button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+        
+        .auto-scan {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 10px;
+            color: #d1d5db;
+            justify-content: flex-end;
+            white-space: nowrap;
+        }
+        
+        .switch {
+            position: relative;
+            display: inline-block;
+            width: 28px;
+            height: 16px;
+            flex-shrink: 0;
+        }
+        
+        .switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+        
+        .slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: #374151;
+            transition: .3s;
+            border-radius: 16px;
+        }
+        
+        .slider:before {
+            position: absolute;
+            content: "";
+            height: 12px;
+            width: 12px;
+            left: 2px;
+            bottom: 2px;
+            background-color: #f3f4f6;
+            transition: .3s;
+            border-radius: 50%;
+        }
+        
+        input:checked + .slider {
+            background-color: #10b981;
+        }
+        
+        input:checked + .slider:before {
+            transform: translateX(12px);
+        }
+        
+        .status-green {
+            background-color: #10b981;
+            box-shadow: 0 0 8px rgba(16, 185, 129, 0.5);
+        }
+        
+        .status-yellow {
+            background-color: #f59e0b;
+            box-shadow: 0 0 8px rgba(245, 158, 11, 0.5);
+            animation: pulse 1.5s infinite;
+        }
+        
+        .status-red {
+            background-color: #ef4444;
+            box-shadow: 0 0 8px rgba(239, 68, 68, 0.5);
+        }
+        
+        .status-gray {
+            background-color: #6b7280;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        
+        .status-error {
+            background: rgba(239, 68, 68, 0.1);
+            color: #ef4444;
+            border: 1px solid rgba(239, 68, 68, 0.2);
+        }
+        
+        .status-success {
+            background: rgba(16, 185, 129, 0.1);
+            color: #10b981;
+            border: 1px solid rgba(16, 185, 129, 0.2);
+        }
+        
+        .status-warning {
+            background: rgba(245, 158, 11, 0.1);
+            color: #f59e0b;
+            border: 1px solid rgba(245, 158, 11, 0.2);
+        }
+        
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+        
+        .tooltip {
+            position: relative;
+            display: inline-block;
+        }
+        
+        .scan-button .icon {
+            font-size: 11px;
+        }
+        
+        .button-text {
+            display: inline-block;
+        }
+        
+        /* Для очень маленьких экранов */
+        @media (max-width: 180px) {
+            .button-text {
+                display: none;
+            }
+            .scan-button {
+                padding: 5px 2px;
+            }
+        }
+        
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div id="statusMessage" class="status-message">
+                Initializing...
+            </div>
+            <div class="status-indicator" id="statusIndicator"></div>
+        </div>
+        
+        <div class="controls-row">
+            <div class="buttons-container">
+                <button id="scanBtn" class="scan-button">
+                    <span class="icon">🔍</span>
+                    <span class="button-text">Scan</span>
+                </button>
+                <button id="rallyScanBtn" class="scan-button">
+                    <span class="icon">🏹</span>
+                    <span class="button-text">Rally</span>
+                </button>
+            </div>
+            
+            <div class="auto-scan">
+                <label class="switch">
+                    <input type="checkbox" id="autoScanToggle">
+                    <span class="slider"></span>
+                </label>
+                <span>Auto</span>
+            </div>
+        </div>
+    </div>
+    
+    <script src="popup.js"></script>
+</body>
+</html>

@@ -1,0 +1,31 @@
+{
+  "manifest_version": 3,
+  "name": "Travian Attack Scanner",
+  "version": "1.0",
+  "description": "Сканирует атаки в Travian и отправляет в Telegram",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage",
+    "webRequest"
+  ],
+  "host_permissions": [
+    "https://*.travian.com/*",
+    "http://127.0.0.1:8000/*",
+    "http://localhost:8000/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Travian Attack Scanner"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://*.travian.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
