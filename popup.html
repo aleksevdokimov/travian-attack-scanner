@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <style>
         body {
-            width: 160px; /* Увеличил ширину для двух кнопок */
+            width: 260px;
             padding: 12px;
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
             background: #111827;
@@ -16,9 +16,144 @@
         .container {
             display: flex;
             flex-direction: column;
-            gap: 10px;
+            gap: 12px;
         }
         
+        /* Секция активации */
+        .activation-section {
+            background: rgba(59, 130, 246, 0.1);
+            border: 1px solid rgba(59, 130, 246, 0.2);
+            border-radius: 8px;
+            padding: 12px;
+        }
+        
+        .activation-title {
+            font-size: 12px;
+            font-weight: 600;
+            margin-bottom: 8px;
+            color: #3b82f6;
+        }
+        
+        .activation-input-group {
+            display: flex;
+            gap: 6px;
+            margin-bottom: 8px;
+        }
+        
+        .activation-input {
+            flex: 1;
+            min-width: 80px;
+            padding: 6px 8px;
+            background: #1f2937;
+            border: 1px solid #374151;
+            border-radius: 6px;
+            color: #f3f4f6;
+            font-size: 12px;
+            font-family: monospace;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+        }
+        
+        .activation-input:focus {
+            outline: none;
+            border-color: #3b82f6;
+        }
+        
+        .activate-btn {
+            padding: 6px 10px;
+            background: linear-gradient(135deg, #3b82f6, #2563eb);
+            color: white;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 11px;
+            font-weight: 600;
+            white-space: nowrap;
+        }
+        
+        .activate-btn:hover:not(:disabled) {
+            background: linear-gradient(135deg, #2563eb, #1d4ed8);
+        }
+        
+        .activate-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        
+        .activation-message {
+            font-size: 11px;
+            padding: 6px;
+            border-radius: 4px;
+            text-align: center;
+        }
+        
+        .activation-message.success {
+            background: rgba(16, 185, 129, 0.1);
+            color: #10b981;
+        }
+        
+        .activation-message.error {
+            background: rgba(239, 68, 68, 0.1);
+            color: #ef4444;
+        }
+        
+        .activation-message.info {
+            background: rgba(59, 130, 246, 0.1);
+            color: #3b82f6;
+        }
+        
+        .activation-message.warning {
+            background: rgba(245, 158, 11, 0.1);
+            color: #f59e0b;
+        }
+        
+        .player-info {
+            font-size: 11px;
+            color: #9ca3af;
+            margin-bottom: 8px;
+            padding: 4px;
+            background: #1f2937;
+            border-radius: 4px;
+        }
+        
+        .player-info span {
+            color: #f3f4f6;
+            font-weight: 500;
+        }
+        
+        .activated-badge {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px;
+            background: rgba(16, 185, 129, 0.1);
+            border-radius: 6px;
+            color: #10b981;
+            font-size: 11px;
+        }
+        
+        .activated-badge svg {
+            width: 14px;
+            height: 14px;
+            fill: #10b981;
+        }
+        
+        /* Стили для переключения состояний */
+        .state-container {
+            transition: all 0.3s ease;
+        }
+        
+        .state-hidden {
+            display: none !important;
+        }
+        
+        .separator {
+            height: 1px;
+            background: #374151;
+            margin: 8px 0;
+        }
+        
+        /* Остальные стили из предыдущей версии */
         .header {
             display: flex;
             align-items: flex-start;
@@ -42,19 +177,13 @@
             border-radius: 4px;
             font-size: 10px;
             text-align: center;
-            animation: fadeIn 0.3s;
             min-height: 20px;
-            height: auto;
             display: flex;
             align-items: center;
             justify-content: center;
-            line-height: 1.3;
             background: rgba(59, 130, 246, 0.1);
             color: #3b82f6;
             border: 1px solid rgba(59, 130, 246, 0.2);
-            word-break: break-word;
-            overflow: hidden;
-            box-sizing: border-box;
         }
         
         .controls-row {
@@ -86,9 +215,6 @@
             justify-content: center;
             gap: 3px;
             height: 28px;
-            min-height: 28px;
-            box-sizing: border-box;
-            white-space: nowrap;
         }
         
         #scanBtn {
@@ -101,14 +227,6 @@
         
         .scan-button:hover:not(:disabled) {
             transform: translateY(-1px);
-        }
-        
-        #scanBtn:hover:not(:disabled) {
-            background: linear-gradient(135deg, #059669, #047857);
-        }
-        
-        #rallyScanBtn:hover:not(:disabled) {
-            background: linear-gradient(135deg, #7c3aed, #6d28d9);
         }
         
         .scan-button:disabled {
@@ -125,7 +243,6 @@
             font-size: 10px;
             color: #d1d5db;
             justify-content: flex-end;
-            white-space: nowrap;
         }
         
         .switch {
@@ -231,11 +348,6 @@
             font-size: 11px;
         }
         
-        .button-text {
-            display: inline-block;
-        }
-        
-        /* Для очень маленьких экранов */
         @media (max-width: 180px) {
             .button-text {
                 display: none;
@@ -244,12 +356,34 @@
                 padding: 5px 2px;
             }
         }
-        
     </style>
 </head>
 <body>
     <div class="container">
-        <div class="header">
+        <!-- Состояние 1: Не авторизован (показываем активацию) -->
+        <div id="unauthState" class="state-container">
+            <div class="activation-section" id="activationSection">
+                <div class="activation-title">🔐 Активация аккаунта</div>
+                <div class="player-info" id="playerInfo">
+                    Загрузка информации...
+                </div>
+                <div class="activation-input-group" id="activationInputGroup">
+                    <input type="text" id="verificationCode" class="activation-input" placeholder="Введите код" maxlength="10">
+                    <button id="activateBtn" class="activate-btn">Подтвердить</button>
+                </div>
+                <div id="activationMessage" class="activation-message" style="display: none;"></div>
+                <div id="activatedBadge" class="activated-badge" style="display: none;">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="20 6 9 17 4 12"></polyline>
+                    </svg>
+                    <span>Аккаунт подтверждён</span>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Состояние 2: Авторизован (показываем сканеры) -->
+        <div id="authState" class="state-container" style="display: none;">
+            <div class="header">
             <div id="statusMessage" class="status-message">
                 Initializing...
             </div>
@@ -275,6 +409,7 @@
                 </label>
                 <span>Auto</span>
             </div>
+        </div>
         </div>
     </div>
     

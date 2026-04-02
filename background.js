@@ -5,11 +5,54 @@ const MIN_AUTO_SCAN_INTERVAL = CONFIG.MIN_AUTO_SCAN_INTERVAL;
 const DEBUG = CONFIG.DEBUG;
 
 let lastAutoScanTime = 0;
+let pendingOperations = new Set(); // Отслеживаем незавершенные операции
 
 //Логируем только в режиме отладки
 function debugLog(...args) {
   if (DEBUG) {
     console.log(...args);
+  }
+}
+
+// Очистка при выгрузке service worker
+self.addEventListener('unload', () => {
+  console.log('[Background] Service worker unloading, cleaning up...');
+  // Отменяем все ожидающие операции
+  pendingOperations.clear();
+});
+
+// Обработчик ошибок для незавершенных операций
+function handleAsyncError(error, context) {
+  if (!error) return;
+  
+  const errorMsg = error.message || error.toString();
+  console.error(`[Background] Async error in ${context}:`, errorMsg);
+  
+  if (errorMsg.includes('Extension context invalidated') ||
+      errorMsg.includes('context invalidated')) {
+    console.warn('[Background] Extension context lost');
+    return true;
+  }
+  
+  if (errorMsg.includes('write after end')) {
+    console.warn('[Background] Stream write error - port may have been closed');
+    return true;
+  }
+  
+  if (errorMsg.includes('Could not establish connection')) {
+    console.warn('[Background] Connection lost - tab may have been closed');
+    return true;
+  }
+  
+  return false;
+}
+
+// Безопасная отправка ответа
+function safeSendResponse(sendResponse, response) {
+  try {
+    sendResponse(response);
+  } catch (e) {
+    // Порт уже закрыт, игнорируем
   }
 }
 
@@ -39,14 +82,25 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         debugLog('addListener: Processing attack data...');
         
         // Обрабатываем данные в фоновом режиме
+        const operationId = Math.random().toString(36).substr(2, 9);
+        pendingOperations.add(operationId);
+        
         sendAttackData(message.data)
             .then(() => {
                 console.log('addListener Auto-scan data processed successfully');
-                sendResponse({ success: true });
+                pendingOperations.delete(operationId);
+                // Проверяем, что sendResponse еще не был вызван
+                safeSendResponse(sendResponse, { success: true });
             })
             .catch(error => {
-                console.error('addListener Error processing auto-scan data:', error);
-                sendResponse({ success: false, error: error.message });
+                debugLog('addListener Error processing auto-scan data:', error);
+                pendingOperations.delete(operationId);
+                
+                if (!handleAsyncError(error, 'sendAttackData')) {
+                  console.error('addListener Unhandled error:', error);
+                }
+                
+                safeSendResponse(sendResponse, { success: false, error: error.message });
             });
             
         return true; // Сохраняем соединение для асинхронного ответа
@@ -54,7 +108,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 	
 	if (message.type === 'GET_ACTIVE_TAB') {
         getActiveTabId().then(tabId => {
-            sendResponse({ tabId });
+            safeSendResponse(sendResponse, { tabId });
+        }).catch(error => {
+          console.error('GET_ACTIVE_TAB error:', error);
+          safeSendResponse(sendResponse, { error: error.message });
         });
         return true; // Важно для асинхронного ответа
     }
@@ -72,6 +129,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 async function handleGetVillageAttack(message, sender, sendResponse) {
     try {
+        // Проверяем, что tabId валиден
+        if (!sender?.tab?.id) {
+            safeSendResponse(sendResponse, { success: false, error: 'No valid tab ID' });
+            return;
+        }
+        
         // Используем chrome.scripting.executeScript в background
         const result = await chrome.scripting.executeScript({
             target: { tabId: sender.tab.id },
@@ -89,9 +152,12 @@ async function handleGetVillageAttack(message, sender, sendResponse) {
             args: [message.villageId]
         });
         
-        sendResponse({ success: true, data: result[0]?.result });
+        safeSendResponse(sendResponse, { success: true, data: result[0]?.result });
     } catch (error) {
-        sendResponse({ success: false, error: error.message });
+        if (!handleAsyncError(error, 'handleGetVillageAttack')) {
+            console.error('[Background] handleGetVillageAttack error:', error);
+        }
+        safeSendResponse(sendResponse, { success: false, error: error.message });
     }
 }
 

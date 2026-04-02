@@ -138,18 +138,31 @@ if (window.location.href.includes('travian.com')) {
             
             // Отправляем данные через background
             console.log('[Travian Scanner] Sending data to background script...');
-            const response = await chrome.runtime.sendMessage({
-                type: 'SEND_ATTACK_DATA',
-                data: {
-                    villages: villageData,
-                    alliance: allianceData,
-                    timestamp: new Date().toISOString(),
-                    server: server,
-                    playerName: playerName,
-                    authKey: authKey.key,
-                    page: window.location.href
+            
+            let response;
+            try {
+                response = await chrome.runtime.sendMessage({
+                    type: 'SEND_ATTACK_DATA',
+                    data: {
+                        villages: villageData,
+                        alliance: allianceData,
+                        timestamp: new Date().toISOString(),
+                        server: server,
+                        playerName: playerName,
+                        authKey: authKey.key,
+                        page: window.location.href
+                    }
+                });
+            } catch (runtimeError) {
+                const errorMsg = runtimeError.message || runtimeError.toString();
+                if (errorMsg.includes('Extension context invalidated') || 
+                    errorMsg.includes('context invalidated')) {
+                    console.warn('[Travian Scanner] Extension context invalidated, aborting send');
+                    return;
                 }
-            });
+                // Пробрасываем другие ошибки
+                throw runtimeError;
+            }
             
             if (response && response.success) {
                 console.log('[Travian Scanner] Auto-scan data sent successfully');
@@ -208,11 +221,22 @@ if (window.location.href.includes('travian.com')) {
             console.log(`[Travian Scanner] Requesting attack data for village ${villageId} from background...`);
             
             // Отправляем запрос в background script
-            const response = await chrome.runtime.sendMessage({
-                type: 'GET_VILLAGE_ATTACK',
-                villageId: villageId,
-                url: window.location.href
-            });
+            let response;
+            try {
+                response = await chrome.runtime.sendMessage({
+                    type: 'GET_VILLAGE_ATTACK',
+                    villageId: villageId,
+                    url: window.location.href
+                });
+            } catch (runtimeError) {
+                const errorMsg = runtimeError.message || runtimeError.toString();
+                if (errorMsg.includes('Extension context invalidated') || 
+                    errorMsg.includes('context invalidated')) {
+                    console.warn('[Travian Scanner] Extension context invalidated, aborting request');
+                    return null;
+                }
+                throw runtimeError;
+            }
             
             if (response && response.success && response.data) {
                 console.log(`[Travian Scanner] Received attack data for village ${villageId}:`, response.data);

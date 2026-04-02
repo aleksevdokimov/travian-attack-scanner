@@ -1,4 +1,17 @@
 document.addEventListener('DOMContentLoaded', function() {
+    // Элементы для переключения состояний
+    const unauthState = document.getElementById('unauthState');
+    const authState = document.getElementById('authState');
+    
+    // Элементы активации (остаются в unauthState)
+    const playerInfo = document.getElementById('playerInfo');
+    const verificationCodeInput = document.getElementById('verificationCode');
+    const activateBtn = document.getElementById('activateBtn');
+    const activationMessage = document.getElementById('activationMessage');
+    const activatedBadge = document.getElementById('activatedBadge');
+    const activationInputGroup = document.getElementById('activationInputGroup');
+    
+    // Элементы авторизованного состояния
     const scanBtn = document.getElementById('scanBtn');
     const rallyScanBtn = document.getElementById('rallyScanBtn');
     const statusMessage = document.getElementById('statusMessage');
@@ -6,27 +19,44 @@ document.addEventListener('DOMContentLoaded', function() {
     const autoScanToggle = document.getElementById('autoScanToggle');
     
     const API_URL = 'http://127.0.0.1:8000';
-    const AUTH_API_URL = `${API_URL}/api/auth/key`;
-    const ATTACKS_API_URL = `${API_URL}/api/attacks`;
-    const RALLY_API_URL = `${API_URL}/api/rally-point`;
+    const AUTH_API_URL = `${API_URL}/game/api/auth/key`;
+    const ATTACKS_API_URL = `${API_URL}/game/api/attacks`;
+    const RALLY_API_URL = `${API_URL}/game/api/rally-point`;
+    const VERIFY_API_URL = `${API_URL}/game/browser/verify`;
     
     let isScanning = false;
     let isRallyScanning = false;
     let currentServer = '';
     let currentPlayerName = '';
+    let currentPlayerAccountId = null;
     let authKey = '';
     let isAuthorized = false;
+    let isActivated = false;
     let currentTabId = null;
+    
+    // Функция переключения UI между состояниями
+    function switchToUnauthState() {
+        unauthState.classList.remove('state-hidden');
+        unauthState.style.display = 'block';
+        authState.style.display = 'none';
+        authState.classList.add('state-hidden');
+    }
+    
+    function switchToAuthState() {
+        unauthState.style.display = 'none';
+        unauthState.classList.add('state-hidden');
+        authState.classList.remove('state-hidden');
+        authState.style.display = 'block';
+    }
     
     // Состояния индикатора
     const STATUS = {
-        GREEN: 'green',     // Ключ есть, сервер доступен
-        YELLOW: 'yellow',   // Ожидание ответа или проблемы с отправкой
-        RED: 'red',         // Доступ запрещен
-        GRAY: 'gray'        // Не инициализирован
+        GREEN: 'green',
+        YELLOW: 'yellow',
+        RED: 'red',
+        GRAY: 'gray'
     };
     
-    // Установить состояние индикатора
     function setStatus(status, message = '') {
         statusIndicator.className = 'status-indicator';
         
@@ -53,16 +83,300 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     }
     
-    // Показать статусное сообщение
     function showStatus(message, type = 'info') {
         statusMessage.textContent = message;
         statusMessage.className = `status-message status-${type}`;
     }
     
-    // Получить активную вкладку
+    function showActivationMessage(message, type = 'info') {
+        activationMessage.textContent = message;
+        activationMessage.className = `activation-message ${type}`;
+        activationMessage.style.display = 'block';
+        
+        setTimeout(() => {
+            activationMessage.style.display = 'none';
+        }, 3000);
+    }
+    
     async function getActiveTab() {
         const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
         return tab;
+    }
+    
+    // Получение информации об игроке со страницы
+    async function getPlayerInfoFromPage() {
+        try {
+            const tab = await getActiveTab();
+            
+            if (!tab.url.includes('travian.com')) {
+                return { server: '', playerName: '', playerAccountId: null, isValid: false };
+            }
+            
+            const result = await chrome.scripting.executeScript({
+                target: { tabId: tab.id },
+                func: () => {
+                    const server = window.location.hostname;
+                    
+                    // Получаем имя игрока
+                    let playerName = '';
+                    const villageBoxes = document.getElementById('villageBoxes');
+                    if (villageBoxes) {
+                        const playerNameElement = villageBoxes.querySelector('.playerName');
+                        if (playerNameElement) {
+                            playerName = playerNameElement.textContent.trim();
+                        }
+                    }
+                    
+                    // Получаем account_id из ссылки на профиль
+                    let playerAccountId = null;
+                    // Ищем ссылку на профиль игрока
+                    const profileLinks = document.querySelectorAll('a[href^="/profile/"]');
+                    for (const link of profileLinks) {
+                        const linkText = link.textContent.trim();
+                        if (linkText === playerName) {
+                            const match = link.getAttribute('href').match(/\/profile\/(\d+)/);
+                            if (match) {
+                                playerAccountId = parseInt(match[1]);
+                                break;
+                            }
+                        }
+                    }
+                    
+                    // Если не нашли по имени, берём первую попавшуюся ссылку на профиль
+                    if (!playerAccountId && profileLinks.length > 0) {
+                        const match = profileLinks[0].getAttribute('href').match(/\/profile\/(\d+)/);
+                        if (match) {
+                            playerAccountId = parseInt(match[1]);
+                        }
+                    }
+                    
+                    console.log('[Popup] Player info:', { playerName, playerAccountId, server });
+                    return { server, playerName, playerAccountId, isValid: !!playerName };
+                }
+            });
+            
+            return result[0]?.result || { server: '', playerName: '', playerAccountId: null, isValid: false };
+            
+        } catch (error) {
+            console.error('Error getting player info:', error);
+            return { server: '', playerName: '', playerAccountId: null, isValid: false };
+        }
+    }
+    
+    // Проверка статуса активации (только локальная)
+    async function checkActivationStatus() {
+        if (!currentPlayerAccountId || !currentServer) {
+            return false;
+        }
+        
+        try {
+            const tab = await getActiveTab();
+            const result = await chrome.scripting.executeScript({
+                target: { tabId: tab.id },
+                func: (playerName, serverUrl) => {
+                    const activatedKey = `activated_${serverUrl}_${playerName}`;
+                    const isActivated = localStorage.getItem(activatedKey) === 'true';
+                    console.log('[Content] checkActivationStatus:', playerName, serverUrl, isActivated);
+                    return isActivated;
+                },
+                args: [currentPlayerName, currentServer]
+            });
+            
+            return result[0]?.result || false;
+            
+        } catch (error) {
+            console.error('Error checking activation status:', error);
+            return false;
+        }
+    }
+    
+    // Обновление UI секции активации
+    async function updateActivationUI() {
+        console.log('[Popup] updateActivationUI - currentPlayerName:', currentPlayerName);
+        console.log('[Popup] updateActivationUI - currentPlayerAccountId:', currentPlayerAccountId);
+        
+        if (!currentPlayerName || !currentPlayerAccountId) {
+            playerInfo.innerHTML = '<span>❌ Не удалось определить игрока</span>';
+            activationInputGroup.style.display = 'none';
+            activatedBadge.style.display = 'none';
+            return;
+        }
+        
+        playerInfo.innerHTML = `<span>🎮 ${escapeHtml(currentPlayerName)}</span> (ID: ${currentPlayerAccountId})`;
+        
+        const isActivatedLocal = await checkActivationStatus();
+        
+        console.log('[Popup] updateActivationUI - isActivatedLocal:', isActivatedLocal);
+        
+        if (isActivatedLocal) {
+            activationInputGroup.style.display = 'none';
+            activatedBadge.style.display = 'flex';
+            isActivated = true;
+            
+            // Если уже активирован, но ключа нет — запросим ключ
+            const savedKey = await checkSavedKey(currentServer, currentPlayerName);
+            if (!savedKey || !savedKey.key) {
+                console.log('[Popup] Activated but no key, requesting...');
+                const authorized = await requestAuthKey(currentServer, currentPlayerName);
+                if (authorized) {
+                    // Переключаемся на авторизованное состояние
+                    switchToAuthState();
+                }
+            } else {
+                // Уже есть ключ, переключаемся
+                authKey = savedKey.key;
+                isAuthorized = true;
+                switchToAuthState();
+            }
+        } else {
+            activationInputGroup.style.display = 'flex';
+            activatedBadge.style.display = 'none';
+            isActivated = false;
+            // Показываем состояние активации
+            switchToUnauthState();
+        }
+    }
+    
+    // Отправка запроса на активацию
+    async function sendActivationRequest() {
+        const
+        code = verificationCodeInput.value.trim().toUpperCase();
+        
+        console.log('[Popup] === sendActivationRequest START ===');
+        console.log('[Popup] Code entered:', code ? `${code.substring(0, 2)}***` : 'EMPTY');
+        console.log('[Popup] currentPlayerAccountId:', currentPlayerAccountId);
+        console.log('[Popup] currentServer:', currentServer);
+        console.log('[Popup] currentPlayerName:', currentPlayerName);
+        
+        if (!code) {
+            showActivationMessage('Введите код подтверждения', 'warning');
+            return;
+        }
+        
+        if (code.length < 4 || code.length > 10) {
+            showActivationMessage('Код должен быть от 4 до 10 символов', 'warning');
+            return;
+        }
+        
+        if (!currentPlayerAccountId) {
+            showActivationMessage('Не удалось определить ID игрока', 'error');
+            return;
+        }
+        
+        activateBtn.disabled = true;
+        activateBtn.textContent = 'Проверка...';
+        
+        try {
+            const fullServerUrl = `https://${currentServer}/`;
+            
+            console.log('[Popup] Sending verification request...');
+            console.log('[Popup] VERIFY_API_URL:', VERIFY_API_URL);
+            console.log('[Popup] Request body:', {
+                verification_code: code,
+                player_account_id: currentPlayerAccountId,
+                server_url: fullServerUrl
+            });
+            
+            const response = await fetch(VERIFY_API_URL, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    verification_code: code,
+                    player_account_id: currentPlayerAccountId,
+                    server_url: fullServerUrl
+                })
+            });
+            
+            console.log('[Popup] Response status:', response.status, response.statusText);
+            
+            // Получаем текст ответа для отладки
+            const responseText = await response.text();
+            console.log('[Popup] Response text:', responseText);
+            
+            let data;
+            try {
+                data = JSON.parse(responseText);
+            } catch (e) {
+                console.error('[Popup] Failed to parse JSON:', e);
+                data = { success: false, message: 'Invalid server response' };
+            }
+            
+            console.log('[Popup] Parsed response data:', data);
+            
+            if (response.ok && data.success) {
+                console.log('[Popup] ✅ Activation SUCCESS!');
+                showActivationMessage('✅ Аккаунт подтверждён!', 'success');
+                
+                // Сохраняем API-ключ
+                if (data.api_key) {
+                    console.log('[Popup] Saving API key:', data.api_key.substring(0, 10) + '...');
+                    await saveKey(currentServer, currentPlayerName, data.api_key);
+                    authKey = data.api_key;
+                    isAuthorized = true;
+                    console.log('[Popup] ✅ API key saved');
+                } else {
+                    console.log('[Popup] ⚠️ No api_key in response! Response:', data);
+                    showActivationMessage('⚠️ Ключ не получен, но аккаунт подтверждён', 'warning');
+                }
+                
+                // Сохраняем статус активации в localStorage страницы
+                console.log('[Popup] Saving activation to localStorage...');
+                const tab = await getActiveTab();
+                console.log('[Popup] Active tab id:', tab.id);
+                
+                await chrome.scripting.executeScript({
+                    target: { tabId: tab.id },
+                    func: (playerName, serverUrl) => {
+                        const activatedKey = `activated_${serverUrl}_${playerName}`;
+                        localStorage.setItem(activatedKey, 'true');
+                        console.log('[Content] ✅ Saved activation to localStorage:', activatedKey);
+                        return true;
+                    },
+                    args: [currentPlayerName, currentServer]
+                });
+                
+                console.log('[Popup] Updating UI...');
+                
+                // Переключаемся на авторизованное состояние
+                switchToAuthState();
+                
+                // Обновляем UI
+                activationInputGroup.style.display = 'none';
+                activatedBadge.style.display = 'flex';
+                isActivated = true;
+                
+                // Обновляем статус авторизации
+                setStatus(STATUS.GREEN, 'Authorized');
+                scanBtn.disabled = false;
+                rallyScanBtn.disabled = false;
+                
+                // Очищаем поле ввода
+                verificationCodeInput.value = '';
+                
+                // Закрываем окно через 2 секунды
+                setTimeout(() => {
+                    window.close();
+                }, 2000);
+                
+            } else {
+                console.log('[Popup] ❌ Activation FAILED:', data.message || 'Unknown error');
+                showActivationMessage(data.message || '❌ Неверный код подтверждения', 'error');
+                verificationCodeInput.value = '';
+                verificationCodeInput.focus();
+            }
+            
+        } catch (error) {
+            console.error('[Popup] ❌ Activation error:', error);
+            console.error('[Popup] Error name:', error.name);
+            console.error('[Popup] Error message:', error.message);
+            showActivationMessage('❌ Ошибка подключения к серверу', 'error');
+        } finally {
+            console.log('[Popup] === sendActivationRequest END ===');
+            activateBtn.disabled = false;
+            activateBtn.textContent = 'Подтвердить';
+        }
     }
     
     // Получить JWT токен через background script
@@ -70,21 +384,23 @@ document.addEventListener('DOMContentLoaded', function() {
         try {
             console.log('[Popup] Getting JWT token...');
             const tab = await getActiveTab();
-            console.log('[Popup] Tab URL:', tab.url);
             
-            const response = await chrome.runtime.sendMessage({
-                type: 'GET_JWT_TOKEN'
-            });
-            
-            console.log('[Popup] JWT response:', response);
-            
-            if (response.token) {
-                console.log('[Popup] JWT token received, length:', response.token.length);
-            } else {
-                console.error('[Popup] No JWT token in response');
+            let response;
+            try {
+                response = await chrome.runtime.sendMessage({
+                    type: 'GET_JWT_TOKEN'
+                });
+            } catch (runtimeError) {
+                const errorMsg = runtimeError.message || runtimeError.toString();
+                if (errorMsg.includes('Extension context invalidated') || 
+                    errorMsg.includes('context invalidated')) {
+                    console.warn('[Popup] Extension context invalidated');
+                    return null;
+                }
+                throw runtimeError;
             }
             
-            return response.token;
+            return response?.token;
         } catch (error) {
             console.error('[Popup] Error getting JWT:', error);
             return null;
@@ -93,41 +409,12 @@ document.addEventListener('DOMContentLoaded', function() {
     
     // Получить информацию о сервере и игроке со страницы
     async function getServerAndPlayerInfo() {
-        try {
-            const tab = await getActiveTab();
-            
-            if (!tab.url.includes('travian.com')) {
-                return { server: '', playerName: '', isValid: false };
-            }
-            
-            const result = await chrome.scripting.executeScript({
-                target: { tabId: tab.id },
-                func: () => {
-                    // Получаем домен сервера
-                    const server = window.location.hostname;
-                    
-					let playerName = '';
-					
-                    // Получаем имя игрока
-                    const villageBoxes = document.getElementById('villageBoxes');
-					if (villageBoxes) {
-						// Ищем элемент с классом playerName внутри villageBoxes
-						const playerNameElement = villageBoxes.querySelector('.playerName');
-						if (playerNameElement) {
-							playerName = playerNameElement.textContent.trim();
-						}
-					}
-                    console.log('[Travian Scanner] PlayerName = ',playerName); 
-                    return { server, playerName, isValid: !!playerName };
-                }
-            });
-            
-            return result[0]?.result || { server: '', playerName: '', isValid: false };
-            
-        } catch (error) {
-            console.error('Error getting server info:', error);
-            return { server: '', playerName: '', isValid: false };
-        }
+        const info = await getPlayerInfoFromPage();
+        return { 
+            server: info.server, 
+            playerName: info.playerName, 
+            isValid: info.isValid 
+        };
     }
     
     // Проверить сохраненный ключ
@@ -206,7 +493,6 @@ document.addEventListener('DOMContentLoaded', function() {
             const result = await response.json();
             
             if (result.status === 'confirmed' && result.key) {
-                // Сохраняем ключ
                 await saveKey(server, playerName, result.key);
                 authKey = result.key;
                 isAuthorized = true;
@@ -230,36 +516,40 @@ document.addEventListener('DOMContentLoaded', function() {
     
     // Проверить авторизацию
     async function checkAuthorization() {
-        // Получаем активную вкладку
         const tab = await getActiveTab();
         const isTravianPage = tab.url && tab.url.includes('travian.com');
         
         if (!isTravianPage) {
-            scanBtn.disabled = true;
-            rallyScanBtn.disabled = true;
-            autoScanToggle.disabled = true;
-            setStatus(STATUS.GRAY, 'Open Travian page');
+            // Не на Travian — показываем состояние "не авторизован" с сообщением
+            playerInfo.innerHTML = '<span>❌ Откройте страницу Travian</span>';
+            switchToUnauthState();
             return false;
         }
         
-        // Разблокируем переключатель если на Travian
         autoScanToggle.disabled = false;
         
-        // Получаем информацию о сервере и игроке
-        const { server, playerName, isValid } = await getServerAndPlayerInfo();
+        // Получаем информацию об игроке заново, чтобы обновить currentPlayerAccountId
+        const playerInfoData = await getPlayerInfoFromPage();
+        currentServer = playerInfoData.server;
+        currentPlayerName = playerInfoData.playerName;
+        currentPlayerAccountId = playerInfoData.playerAccountId;
         
-        if (!isValid) {
-            setStatus(STATUS.GRAY, 'Open Travian page');
+        console.log('[Popup] checkAuthorization - Player info:', {
+            server: currentServer,
+            playerName: currentPlayerName,
+            playerAccountId: currentPlayerAccountId,
+            isValid: playerInfoData.isValid
+        });
+        
+        if (!playerInfoData.isValid || !currentPlayerName) {
+            setStatus(STATUS.GRAY, 'Cannot identify player');
             scanBtn.disabled = true;
             rallyScanBtn.disabled = true;
             return false;
         }
         
-        currentServer = server;
-        currentPlayerName = playerName;
-        
-        // Проверяем сохраненный ключ
-        const savedKey = await checkSavedKey(server, playerName);
+        // Проверяем сохранённый ключ
+        const savedKey = await checkSavedKey(currentServer, currentPlayerName);
         
         if (savedKey && savedKey.key) {
             authKey = savedKey.key;
@@ -267,28 +557,32 @@ document.addEventListener('DOMContentLoaded', function() {
             setStatus(STATUS.GREEN, 'Authorized');
             scanBtn.disabled = false;
             rallyScanBtn.disabled = false;
+            switchToAuthState();
             return true;
         }
         
-        // Запрашиваем новый ключ
-        const authorized = await requestAuthKey(server, playerName);
+        // Проверяем, активирован ли игрок (через localStorage)
+        const isActivated = await checkActivationStatus();
+        console.log('[Popup] checkAuthorization - isActivated:', isActivated);
         
-        if (authorized) {
-            scanBtn.disabled = false;
-            rallyScanBtn.disabled = false;
-        } else {
-            scanBtn.disabled = true;
-            rallyScanBtn.disabled = true;
+        if (isActivated) {
+            // Запрашиваем ключ
+            const authorized = await requestAuthKey(currentServer, currentPlayerName);
+            if (authorized) {
+                switchToAuthState();
+                return true;
+            }
         }
         
-        return authorized;
+        // Не авторизован — показываем форму активации
+        await updateActivationUI();
+        switchToUnauthState();
+        return false;
     }
     
     // Получить данные атак для деревни через API
     async function getVillageAttackData(villageId) {
         try {
-            //console.log(`Getting attack data for village ${villageId}...`);
-            //console.log('Making API call without JWT token...');
             const tab = await getActiveTab();
             
             const result = await chrome.scripting.executeScript({
@@ -296,7 +590,6 @@ document.addEventListener('DOMContentLoaded', function() {
                 func: async (params) => {
                     try {
                         console.log('getVillageAttackData: Get attack for village:', params.villageId);
-                        //console.log('Origin:', window.location.origin);
                         
                         const response = await fetch(`${window.location.origin}/api/v1/tooltip/incomingTroops`, {
                             method: 'POST',
@@ -308,8 +601,6 @@ document.addEventListener('DOMContentLoaded', function() {
                             },
                             body: JSON.stringify({ villageIds: [params.villageId] })
                         });
-                        
-                        //console.log('API response status:', response.status);
                         
                         if (!response.ok) {
                             const errorText = await response.text();
@@ -390,42 +681,31 @@ document.addEventListener('DOMContentLoaded', function() {
                 func: () => {
                     const villages = [];
                     
-                    //console.log('=== POPUP SCAN START ===');
-                    //console.log('Document readyState:', document.readyState);
-                    //console.log('Page URL:', window.location.href);
-					console.log('scanVillages: -------------------------');
+                    console.log('scanVillages: -------------------------');
                     console.log('scanVillages: Begin -------------------');
                     
                     // Находим все записи деревень в списке
-					const villageEntries = document.querySelectorAll('.villageList .listEntry.village');
-					console.log('scanVillages: Found village:', villageEntries.length);
+                    const villageEntries = document.querySelectorAll('.villageList .listEntry.village');
+                    console.log('scanVillages: Found village:', villageEntries.length);
 
-					villageEntries.forEach(entry => {
-						// Получаем ID из data-did атрибута элемента списка
-						const villageId = entry.dataset.did;
-						
-						// Находим элемент с названием внутри этой записи
-						const nameElement = entry.querySelector('.name');
-						const villageName = nameElement?.textContent.trim() || 'Unknown Village';
-						
-						
-						//console.log('Processing village:', {
-						//	id: villageId,
-						//	name: villageName
-						//});
-						
-						// Добавляем только если есть ID
-						if (villageId) {
-							villages.push({
-								id: villageId,
-								name: villageName
-							});
-						}
-					});
+                    villageEntries.forEach(entry => {
+                        // Получаем ID из data-did атрибута элемента списка
+                        const villageId = entry.dataset.did;
+                        
+                        // Находим элемент с названием внутри этой записи
+                        const nameElement = entry.querySelector('.name');
+                        const villageName = nameElement?.textContent.trim() || 'Unknown Village';
+                        
+                        // Добавляем только если есть ID
+                        if (villageId) {
+                            villages.push({
+                                id: villageId,
+                                name: villageName
+                            });
+                        }
+                    });
 
-					console.log('scanVillages: Final villages array:', villages);
-                    
-                    //console.log('Total villages found:', villages.length);
+                    console.log('scanVillages: Final villages array:', villages);
                     console.log('scanVillages: End ---------------------');
                     
                     return villages;
@@ -460,8 +740,8 @@ document.addEventListener('DOMContentLoaded', function() {
                     });
                 }
 				
-				const delayMs = Math.floor(Math.random() * 31) + 20; // 20-50
-				await new Promise(resolve => setTimeout(resolve, delayMs));
+                const delayMs = Math.floor(Math.random() * 31) + 20; // 20-50
+                await new Promise(resolve => setTimeout(resolve, delayMs));
             }
             
             console.log('??1: Final village data:', villageData);
@@ -482,10 +762,10 @@ document.addEventListener('DOMContentLoaded', function() {
                 target: { tabId: tab.id },
                 func: () => {
                     const players = [];
-					let rows = [];
+                    let rows = [];
                     console.log('scanAlliance: -------------------------');
                     console.log('scanAlliance: Begin -------------------');
-                    //console.log('[Travian Scanner] PlayerName = ',currentPlayerName);
+                    
                     if (document.querySelectorAll(".allianceMembers").length > 0) {
                         const rows = document.querySelectorAll(".allianceMembers")[0]
                             .getElementsByTagName("tbody")[0]
@@ -499,14 +779,11 @@ document.addEventListener('DOMContentLoaded', function() {
                             const playerName = playerNameCell.innerText.trim();
                             const attackDiv = rows[i].querySelectorAll(".attack");
                             
-                            //console.log(`Player ${playerName}, attack divs:`, attackDiv.length);
-                            
                             let attackCount = 0;
                             let raidCount = 0;
                             
                             if (attackDiv.length > 0) {
                                 const altText = attackDiv[0].alt || '';
-                                //console.log('Attack div alt text:', altText);    
                                 const parts = altText.split("<br />");
                                 
                                 if (parts[0]) {
@@ -524,14 +801,14 @@ document.addEventListener('DOMContentLoaded', function() {
                                 }
                             }
                             
-                            //console.log(`Player ${playerName}: attacks=${attackCount}, raids=${raidCount}`);
+                            console.log(`scanAlliance: Player ${playerName}: attacks=${attackCount}, raids=${raidCount}`);
                             
                             if (attackCount > 0 || raidCount > 0) {
                                 const playerData = {
                                     name: playerName,
                                     attacks: []
                                 };
-                                console.log(`scanAlliance: Player ${playerName}: attacks=${attackCount}, raids=${raidCount}`);
+                                
                                 if (attackCount > 0) {
                                     playerData.attacks.push({
                                         type: 'attack',
@@ -621,214 +898,214 @@ document.addEventListener('DOMContentLoaded', function() {
         return result;
     }
     
-// Сбор данных из пункта сбора (Rally Point)
-async function scanRallyPoint() {
-    try {
-        const tab = await getActiveTab();
-        
-        const result = await chrome.scripting.executeScript({
-            target: { tabId: tab.id },
-            func: (currentPlayerName, currentServer) => {
-                console.log('scanRallyPoint: -------------------------');
-                console.log('scanRallyPoint: Begin -------------------');
-                
-                const movementInfo = [];
-                let targetInfo = {
-                    village_name: null,
-                    village_id: null,
-                    village_coordinates: { x: null, y: null }
-                };
-                
-                // Находим контейнер с данными пункта сбора
-                const rallyContainer = document.querySelector('.data.rallyPointOverviewContainer');
-                if (!rallyContainer) {
-                    console.log('scanRallyPoint: Rally point container not found');
-                    return { movement_info: [] };
-                }
-                
-                // Получаем информацию о целевой деревне из нижней таблицы
-                const ownTroopsTable = rallyContainer.querySelector('table.troop_details[data-player-name]');
-                if (ownTroopsTable) {
-                    const villageLink = ownTroopsTable.querySelector('thead td.role a');
-                    const coordsElement = ownTroopsTable.querySelector('tbody.units th.coords');
+    // Сбор данных из пункта сбора (Rally Point)
+    async function scanRallyPoint() {
+        try {
+            const tab = await getActiveTab();
+            
+            const result = await chrome.scripting.executeScript({
+                target: { tabId: tab.id },
+                func: (currentPlayerName, currentServer) => {
+                    console.log('scanRallyPoint: -------------------------');
+                    console.log('scanRallyPoint: Begin -------------------');
                     
-                    targetInfo = {
-                        village_name: villageLink?.textContent?.trim() || null,
-                        village_id: ownTroopsTable.getAttribute('data-did'),
+                    const movementInfo = [];
+                    let targetInfo = {
+                        village_name: null,
+                        village_id: null,
                         village_coordinates: { x: null, y: null }
                     };
                     
-                    // Получаем координаты целевой деревни
-                    if (coordsElement) {
-                        const coordsText = coordsElement.textContent || '';
-                        console.log('scanRallyPoint: Target coords raw:', coordsText);
-                        
-                        // Заменяем специальный символ минуса на обычный дефис и удаляем спецсимволы
-                        const normalizedCoords = coordsText
-                            .replace(/−/g, '-')           // заменяем спец-минус на обычный
-                            .replace(/[‭‬]/g, '');         // удаляем другие спецсимволы
-                        
-                        console.log('scanRallyPoint: Target normalized coords:', normalizedCoords);
-                        
-                        // Ищем все числа (теперь с обычным минусом)
-                        const numbers = normalizedCoords.match(/-?\d+/g);
-                        if (numbers && numbers.length >= 2) {
-                            targetInfo.village_coordinates = {
-                                x: parseInt(numbers[0], 10),
-                                y: parseInt(numbers[1], 10)
-                            };
-                            console.log('scanRallyPoint: Target parsed coords from numbers:', numbers);
-                        }
-                        
-                        console.log('scanRallyPoint: Target parsed coords:', targetInfo.village_coordinates);
+                    // Находим контейнер с данными пункта сбора
+                    const rallyContainer = document.querySelector('.data.rallyPointOverviewContainer');
+                    if (!rallyContainer) {
+                        console.log('scanRallyPoint: Rally point container not found');
+                        return { movement_info: [] };
                     }
                     
-                    console.log('scanRallyPoint: Target info:', targetInfo);
-                }
-                
-                // Находим все таблицы с перемещениями (InRaid, InAttack, OutSupply, InSupply)
-                const movementTables = rallyContainer.querySelectorAll('table.troop_details.inRaid, table.troop_details.inAttack, table.troop_details.outSupply, table.troop_details.inSupply');
-                console.log('scanRallyPoint: Found movement tables:', movementTables.length);
-                
-                movementTables.forEach((table, index) => {
-                    try {
-                        // Определяем тип перемещения из класса таблицы
-                        const tableClass = table.className;
-                        let typeMovement = '';
-                        if (tableClass.includes('inRaid')) typeMovement = 'InRaid';
-                        else if (tableClass.includes('inAttack')) typeMovement = 'InAttack';
-                        else if (tableClass.includes('outSupply')) typeMovement = 'OutSupply';
-                        else if (tableClass.includes('inSupply')) typeMovement = 'InSupply';
+                    // Получаем информацию о целевой деревне из нижней таблицы
+                    const ownTroopsTable = rallyContainer.querySelector('table.troop_details[data-player-name]');
+                    if (ownTroopsTable) {
+                        const villageLink = ownTroopsTable.querySelector('thead td.role a');
+                        const coordsElement = ownTroopsTable.querySelector('tbody.units th.coords');
                         
-                        // Получаем информацию об отправителе (атакующем)
-                        const senderCell = table.querySelector('thead td.role a');
-                        const senderName = senderCell?.textContent?.trim() || 'Unknown';
-                        const senderHref = senderCell?.getAttribute('href') || '';
-                        const senderVillageId = senderHref.match(/d=(\d+)/)?.[1] || null;
+                        targetInfo = {
+                            village_name: villageLink?.textContent?.trim() || null,
+                            village_id: ownTroopsTable.getAttribute('data-did'),
+                            village_coordinates: { x: null, y: null }
+                        };
                         
-                        // Получаем координаты атакующего
-                        const coordsElement = table.querySelector('tbody.units th.coords');
-                        let senderCoordinates = { x: null, y: null };
-                        
+                        // Получаем координаты целевой деревни
                         if (coordsElement) {
                             const coordsText = coordsElement.textContent || '';
-                            console.log(`scanRallyPoint: Sender ${index + 1} coords raw:`, coordsText);
+                            console.log('scanRallyPoint: Target coords raw:', coordsText);
                             
                             // Заменяем специальный символ минуса на обычный дефис и удаляем спецсимволы
                             const normalizedCoords = coordsText
-                                .replace(/−/g, '-')           // заменяем спец-минус на обычный
-                                .replace(/[‭‬]/g, '');         // удаляем другие спецсимволы
+                                .replace(/−/g, '-')
+                                .replace(/[‭‬]/g, '');
                             
-                            console.log(`scanRallyPoint: Sender ${index + 1} normalized coords:`, normalizedCoords);
+                            console.log('scanRallyPoint: Target normalized coords:', normalizedCoords);
                             
                             // Ищем все числа (теперь с обычным минусом)
                             const numbers = normalizedCoords.match(/-?\d+/g);
                             if (numbers && numbers.length >= 2) {
-                                senderCoordinates = {
+                                targetInfo.village_coordinates = {
                                     x: parseInt(numbers[0], 10),
                                     y: parseInt(numbers[1], 10)
                                 };
-                                console.log(`scanRallyPoint: Sender ${index + 1} parsed coords from numbers:`, numbers);
+                                console.log('scanRallyPoint: Target parsed coords from numbers:', numbers);
                             }
                             
-                            console.log(`scanRallyPoint: Sender ${index + 1} parsed coords:`, senderCoordinates);
+                            console.log('scanRallyPoint: Target parsed coords:', targetInfo.village_coordinates);
                         }
                         
-                        // Получаем информацию о времени прибытия
-                        const timerElement = table.querySelector('tbody.infos .timer');
-                        const arrivalInSeconds = timerElement ? parseInt(timerElement.getAttribute('value') || '0') : 0;
-                        
-                        const atElement = table.querySelector('tbody.infos .at span:first-child');
-                        let arrivalAt = atElement?.textContent?.trim() || '';
-                        arrivalAt = arrivalAt.replace(/[^\d:]/g, '');
-                        
-                        // Получаем все типы юнитов и их количество
-                        const unitIcons = table.querySelectorAll('tbody.units .uniticon img');
-                        const troopCells = table.querySelectorAll('tbody.units.last td.unit');
-                        
-                        const troops = [];
-                        
-                        // Собираем информацию по каждому юниту
-                        unitIcons.forEach((icon, idx) => {
-                            if (idx < troopCells.length) {
-                                // Получаем класс юнита из атрибута class иконки
-                                const iconClass = icon.getAttribute('class') || '';
-                                
-                                // Ищем класс, начинающийся с 'u' и не 'uhero'
-                                const classMatch = iconClass.match(/\b(u\d+)\b/);
-                                let unitType = classMatch ? classMatch[1] : null;
-                                
-                                if (unitType) {
-                                    const countCell = troopCells[idx];
-                                    const count = countCell?.textContent?.trim() || '0';
-                                    troops.push({
-                                        type: unitType,
-                                        count: count === '?' ? '?' : parseInt(count) || 0
-                                    });
-                                }
-                            }
-                        });
-                        
-                        // Получаем информацию о герое (последняя ячейка)
-                        if (troopCells.length > 0) {
-                            const heroCell = troopCells[troopCells.length - 1];
-                            const heroText = heroCell?.textContent?.trim() || '0';
-                            troops.push({
-                                type: 'uhero',
-                                count: heroText === '?' ? '?' : parseInt(heroText) || 0
-                            });
-                        }
-                        
-                        // Формируем объект перемещения
-                        movementInfo.push({
-                            id: index + 1,
-                            type_movement: typeMovement,
-                            sender: {
-                                village_name: senderName,
-                                village_id: senderVillageId,
-                                village_coordinates: senderCoordinates
-                            },
-                            target: {
-                                village_name: targetInfo.village_name,
-                                village_id: targetInfo.village_id,
-                                village_coordinates: targetInfo.village_coordinates
-                            },
-                            arrival: {
-                                in_seconds: arrivalInSeconds,
-                                at_time: arrivalAt
-                            },
-                            troops: troops,
-                            account: {
-                                server: currentServer,
-                                player_name: currentPlayerName
-                            }
-                        });
-                        
-                    } catch (error) {
-                        console.error('scanRallyPoint: Error processing movement table:', error);
+                        console.log('scanRallyPoint: Target info:', targetInfo);
                     }
-                });
-                
-                console.log('scanRallyPoint: Collected movements:', JSON.stringify(movementInfo, null, 2));
-                console.log('scanRallyPoint: End -----------------------');
-                
-                return { movement_info: movementInfo };
-                
-            },
-            args: [currentPlayerName, currentServer]
-        });
-        
-        const scanResult = result[0]?.result || { movement_info: [] };
-        console.log('scanRallyPoint: Final result:', JSON.stringify(scanResult, null, 2));
-        
-        return scanResult;
-        
-    } catch (error) {
-        console.error('scanRallyPoint: Error scanning rally point:', error);
-        return { movement_info: [] };
+                    
+                    // Находим все таблицы с перемещениями (InRaid, InAttack, OutSupply, InSupply)
+                    const movementTables = rallyContainer.querySelectorAll('table.troop_details.inRaid, table.troop_details.inAttack, table.troop_details.outSupply, table.troop_details.inSupply');
+                    console.log('scanRallyPoint: Found movement tables:', movementTables.length);
+                    
+                    movementTables.forEach((table, index) => {
+                        try {
+                            // Определяем тип перемещения из класса таблицы
+                            const tableClass = table.className;
+                            let typeMovement = '';
+                            if (tableClass.includes('inRaid')) typeMovement = 'InRaid';
+                            else if (tableClass.includes('inAttack')) typeMovement = 'InAttack';
+                            else if (tableClass.includes('outSupply')) typeMovement = 'OutSupply';
+                            else if (tableClass.includes('inSupply')) typeMovement = 'InSupply';
+                            
+                            // Получаем информацию об отправителе (атакующем)
+                            const senderCell = table.querySelector('thead td.role a');
+                            const senderName = senderCell?.textContent?.trim() || 'Unknown';
+                            const senderHref = senderCell?.getAttribute('href') || '';
+                            const senderVillageId = senderHref.match(/d=(\d+)/)?.[1] || null;
+                            
+                            // Получаем координаты атакующего
+                            const coordsElement = table.querySelector('tbody.units th.coords');
+                            let senderCoordinates = { x: null, y: null };
+                            
+                            if (coordsElement) {
+                                const coordsText = coordsElement.textContent || '';
+                                console.log(`scanRallyPoint: Sender ${index + 1} coords raw:`, coordsText);
+                                
+                                // Заменяем специальный символ минуса на обычный дефис и удаляем спецсимволы
+                                const normalizedCoords = coordsText
+                                    .replace(/−/g, '-')
+                                    .replace(/[‭‬]/g, '');
+                                
+                                console.log(`scanRallyPoint: Sender ${index + 1} normalized coords:`, normalizedCoords);
+                                
+                                // Ищем все числа (теперь с обычным минусом)
+                                const numbers = normalizedCoords.match(/-?\d+/g);
+                                if (numbers && numbers.length >= 2) {
+                                    senderCoordinates = {
+                                        x: parseInt(numbers[0], 10),
+                                        y: parseInt(numbers[1], 10)
+                                    };
+                                    console.log(`scanRallyPoint: Sender ${index + 1} parsed coords from numbers:`, numbers);
+                                }
+                                
+                                console.log(`scanRallyPoint: Sender ${index + 1} parsed coords:`, senderCoordinates);
+                            }
+                            
+                            // Получаем информацию о времени прибытия
+                            const timerElement = table.querySelector('tbody.infos .timer');
+                            const arrivalInSeconds = timerElement ? parseInt(timerElement.getAttribute('value') || '0') : 0;
+                            
+                            const atElement = table.querySelector('tbody.infos .at span:first-child');
+                            let arrivalAt = atElement?.textContent?.trim() || '';
+                            arrivalAt = arrivalAt.replace(/[^\d:]/g, '');
+                            
+                            // Получаем все типы юнитов и их количество
+                            const unitIcons = table.querySelectorAll('tbody.units .uniticon img');
+                            const troopCells = table.querySelectorAll('tbody.units.last td.unit');
+                            
+                            const troops = [];
+                            
+                            // Собираем информацию по каждому юниту
+                            unitIcons.forEach((icon, idx) => {
+                                if (idx < troopCells.length) {
+                                    // Получаем класс юнита из атрибута class иконки
+                                    const iconClass = icon.getAttribute('class') || '';
+                                    
+                                    // Ищем класс, начинающийся с 'u' и не 'uhero'
+                                    const classMatch = iconClass.match(/\b(u\d+)\b/);
+                                    let unitType = classMatch ? classMatch[1] : null;
+                                    
+                                    if (unitType) {
+                                        const countCell = troopCells[idx];
+                                        const count = countCell?.textContent?.trim() || '0';
+                                        troops.push({
+                                            type: unitType,
+                                            count: count === '?' ? '?' : parseInt(count) || 0
+                                        });
+                                    }
+                                }
+                            });
+                            
+                            // Получаем информацию о герое (последняя ячейка)
+                            if (troopCells.length > 0) {
+                                const heroCell = troopCells[troopCells.length - 1];
+                                const heroText = heroCell?.textContent?.trim() || '0';
+                                troops.push({
+                                    type: 'uhero',
+                                    count: heroText === '?' ? '?' : parseInt(heroText) || 0
+                                });
+                            }
+                            
+                            // Формируем объект перемещения
+                            movementInfo.push({
+                                id: index + 1,
+                                type_movement: typeMovement,
+                                sender: {
+                                    village_name: senderName,
+                                    village_id: senderVillageId,
+                                    village_coordinates: senderCoordinates
+                                },
+                                target: {
+                                    village_name: targetInfo.village_name,
+                                    village_id: targetInfo.village_id,
+                                    village_coordinates: targetInfo.village_coordinates
+                                },
+                                arrival: {
+                                    in_seconds: arrivalInSeconds,
+                                    at_time: arrivalAt
+                                },
+                                troops: troops,
+                                account: {
+                                    server: currentServer,
+                                    player_name: currentPlayerName
+                                }
+                            });
+                            
+                        } catch (error) {
+                            console.error('scanRallyPoint: Error processing movement table:', error);
+                        }
+                    });
+                    
+                    console.log('scanRallyPoint: Collected movements:', JSON.stringify(movementInfo, null, 2));
+                    console.log('scanRallyPoint: End -----------------------');
+                    
+                    return { movement_info: movementInfo };
+                    
+                },
+                args: [currentPlayerName, currentServer]
+            });
+            
+            const scanResult = result[0]?.result || { movement_info: [] };
+            console.log('scanRallyPoint: Final result:', JSON.stringify(scanResult, null, 2));
+            
+            return scanResult;
+            
+        } catch (error) {
+            console.error('scanRallyPoint: Error scanning rally point:', error);
+            return { movement_info: [] };
+        }
     }
-}
-  
+    
     // Сканирование и отправка данных (основной сканер)
     async function scanAndSend() {
         if (!isAuthorized || isScanning) return;
@@ -945,85 +1222,85 @@ async function scanRallyPoint() {
     }
     
     // Сканирование пункта сбора и отправка данных
-async function scanRallyAndSend() {
-    if (!isAuthorized || isRallyScanning) return;
-    
-    console.log('=== RALLY POINT SCAN START ===');
-    console.log('Authorized:', isAuthorized);
-    console.log('Current server:', currentServer);
-    console.log('Current player:', currentPlayerName);
-    
-    isRallyScanning = true;
-    scanBtn.disabled = true;
-    rallyScanBtn.disabled = true;
-    setStatus(STATUS.YELLOW, 'Scanning Rally Point...');
-    
-    try {
-        const tab = await getActiveTab();
-        console.log('Current tab:', tab);
+    async function scanRallyAndSend() {
+        if (!isAuthorized || isRallyScanning) return;
         
-        if (!tab.url.includes('travian.com')) {
-            console.log('Not a Travian page:', tab.url);
-            showStatus('Open Travian', 'error');
-            return;
-        }
+        console.log('=== RALLY POINT SCAN START ===');
+        console.log('Authorized:', isAuthorized);
+        console.log('Current server:', currentServer);
+        console.log('Current player:', currentPlayerName);
         
-        // Проверяем, что мы на странице пункта сбора
-        if (!tab.url.includes('gid=16')) {
-            console.log('Not on Rally Point page');
-            setStatus(STATUS.RED, 'Open Rally Point first');
-            return;
-        }
+        isRallyScanning = true;
+        scanBtn.disabled = true;
+        rallyScanBtn.disabled = true;
+        setStatus(STATUS.YELLOW, 'Scanning Rally Point...');
         
-        console.log('Starting rally point scan...');
-        const scanResult = await scanRallyPoint();
-        console.log('Rally point scan complete, movements:', scanResult.movement_info.length);
-        
-        if (scanResult.movement_info.length === 0) {
-            setStatus(STATUS.GREEN, 'No movements found');
-            return;
-        }
-        
-        // Отправляем данные на сервер
-        console.log('Sending rally point data...');
         try {
-            const result = await sendDataWithAuth(RALLY_API_URL, {
-                message_id: `rally_${Date.now()}`,
-                type: 'rally_point',
-                movement_info: scanResult.movement_info,
-                metadata: {
-                    server: currentServer,
-                    player: currentPlayerName,
-                    source: 'manual_scan',
-                    page: tab.url,
-                    scan_time: new Date().toISOString(),
-                    total_movements: scanResult.movement_info.length
-                }
-            });
-            console.log('Rally point data sent successfully');
-            setStatus(STATUS.GREEN, `Sent ${scanResult.movement_info.length} movement(s)`);
-        } catch (error) {
-            console.error('Error sending rally point data:', error);
-            setStatus(STATUS.RED, 'Send failed');
-        }
-        
-    } catch (error) {
-        console.error('Rally point scan error:', error);
-        setStatus(STATUS.RED, 'Scan failed');
-    } finally {
-        isRallyScanning = false;
-        scanBtn.disabled = !isAuthorized;
-        rallyScanBtn.disabled = !isAuthorized;
-        console.log('=== RALLY POINT SCAN END ===');
-        
-        // Автозакрытие через 10 секунд при успехе
-        setTimeout(() => {
-            if (statusIndicator.classList.contains('status-green')) {
-                window.close();
+            const tab = await getActiveTab();
+            console.log('Current tab:', tab);
+            
+            if (!tab.url.includes('travian.com')) {
+                console.log('Not a Travian page:', tab.url);
+                showStatus('Open Travian', 'error');
+                return;
             }
-        }, 10000);
+            
+            // Проверяем, что мы на странице пункта сбора
+            if (!tab.url.includes('gid=16')) {
+                console.log('Not on Rally Point page');
+                setStatus(STATUS.RED, 'Open Rally Point first');
+                return;
+            }
+            
+            console.log('Starting rally point scan...');
+            const scanResult = await scanRallyPoint();
+            console.log('Rally point scan complete, movements:', scanResult.movement_info.length);
+            
+            if (scanResult.movement_info.length === 0) {
+                setStatus(STATUS.GREEN, 'No movements found');
+                return;
+            }
+            
+            // Отправляем данные на сервер
+            console.log('Sending rally point data...');
+            try {
+                const result = await sendDataWithAuth(RALLY_API_URL, {
+                    message_id: `rally_${Date.now()}`,
+                    type: 'rally_point',
+                    movement_info: scanResult.movement_info,
+                    metadata: {
+                        server: currentServer,
+                        player: currentPlayerName,
+                        source: 'manual_scan',
+                        page: tab.url,
+                        scan_time: new Date().toISOString(),
+                        total_movements: scanResult.movement_info.length
+                    }
+                });
+                console.log('Rally point data sent successfully');
+                setStatus(STATUS.GREEN, `Sent ${scanResult.movement_info.length} movement(s)`);
+            } catch (error) {
+                console.error('Error sending rally point data:', error);
+                setStatus(STATUS.RED, 'Send failed');
+            }
+            
+        } catch (error) {
+            console.error('Rally point scan error:', error);
+            setStatus(STATUS.RED, 'Scan failed');
+        } finally {
+            isRallyScanning = false;
+            scanBtn.disabled = !isAuthorized;
+            rallyScanBtn.disabled = !isAuthorized;
+            console.log('=== RALLY POINT SCAN END ===');
+            
+            // Автозакрытие через 10 секунд при успехе
+            setTimeout(() => {
+                if (statusIndicator.classList.contains('status-green')) {
+                    window.close();
+                }
+            }, 10000);
+        }
     }
-}
     
     // Загрузка настроек
     async function loadSettings() {
@@ -1041,70 +1318,67 @@ async function scanRallyAndSend() {
         });
     }
     
+    // Экранирование HTML
+    function escapeHtml(text) {
+        if (!text) return '';
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+    
     // Инициализация
     async function init() {
+        // По умолчанию показываем состояние авторизации (оно скрыто, пока не проверим)
+        authState.style.display = 'none';
+        unauthState.style.display = 'block';
+        
         setStatus(STATUS.GRAY, 'Checking...');
         await loadSettings();
         
-        const settings = await chrome.storage.local.get(['autoScan']);
-        console.log('[Popup] Current auto-scan setting:', settings.autoScan);
-        
-        // Получаем информацию о текущей вкладке
         const tab = await getActiveTab();
         const isTravianPage = tab.url && tab.url.includes('travian.com');
         
-        // Блокируем элементы управления если не на Travian
         if (!isTravianPage) {
-            scanBtn.disabled = true;
-            rallyScanBtn.disabled = true;
-            autoScanToggle.disabled = true;
-            setStatus(STATUS.GRAY, 'Open Travian page');
+            playerInfo.innerHTML = '<span>❌ Откройте страницу Travian</span>';
+            switchToUnauthState();
             return;
         }
         
-        // Разблокируем переключатель
         autoScanToggle.disabled = false;
+        
+        // Получаем информацию об игроке
+        const playerInfoData = await getPlayerInfoFromPage();
+        currentServer = playerInfoData.server;
+        currentPlayerName = playerInfoData.playerName;
+        currentPlayerAccountId = playerInfoData.playerAccountId;
+        
+        // Обновляем UI активации
+        await updateActivationUI();
         
         // Проверяем авторизацию
         await checkAuthorization();
         
-        // Показываем статус автосканирования
+        const settings = await chrome.storage.local.get(['autoScan']);
         if (settings.autoScan && isAuthorized) {
             setStatus(STATUS.GREEN, 'Auto-scan enabled');
         }
     }
     
-    // При фокусе на popup обновляем статус
-    window.addEventListener('focus', async () => {
-        // Получаем текущую активную вкладку
-        const tab = await getActiveTab();
-        const isTravianPage = tab.url && tab.url.includes('travian.com');
-        
-        if (!isTravianPage) {
-            scanBtn.disabled = true;
-            rallyScanBtn.disabled = true;
-            autoScanToggle.disabled = true;
-            setStatus(STATUS.GRAY, 'Open Travian page');
-            return;
-        }
-        
-        // Разблокируем элементы если на Travian
-        autoScanToggle.disabled = false;
-        
-        if (currentServer) {
-            await checkAuthorization();
-        }
-    });
-    
     // Обработчики событий
     scanBtn.addEventListener('click', scanAndSend);
     rallyScanBtn.addEventListener('click', scanRallyAndSend);
+    activateBtn.addEventListener('click', sendActivationRequest);
+    
+    verificationCodeInput.addEventListener('keypress', (e) => {
+        if (e.key === 'Enter') {
+            sendActivationRequest();
+        }
+    });
     
     autoScanToggle.addEventListener('change', () => {
-        // Проверяем что мы на Travian странице перед сохранением
         getActiveTab().then(tab => {
             if (!tab.url || !tab.url.includes('travian.com')) {
-                autoScanToggle.checked = !autoScanToggle.checked; // отменяем переключение
+                autoScanToggle.checked = !autoScanToggle.checked;
                 showStatus('Open Travian page first', 'error');
                 return;
             }
@@ -1112,9 +1386,22 @@ async function scanRallyAndSend() {
             const statusText = autoScanToggle.checked ? 'Auto-scan enabled' : 'Auto-scan disabled';
             showStatus(statusText, 'info');
             setStatus(autoScanToggle.checked ? STATUS.GREEN : STATUS.YELLOW, statusText);
-        }).catch(error => {
-            console.error('Error checking tab:', error);
         });
+    });
+    
+    window.addEventListener('focus', async () => {
+        const tab = await getActiveTab();
+        const isTravianPage = tab.url && tab.url.includes('travian.com');
+        
+        if (!isTravianPage) {
+            playerInfo.innerHTML = '<span>❌ Откройте страницу Travian</span>';
+            switchToUnauthState();
+            return;
+        }
+        
+        if (currentServer) {
+            await checkAuthorization();
+        }
     });
     
     // Инициализируем
