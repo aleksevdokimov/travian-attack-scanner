@@ -12,17 +12,19 @@ document.addEventListener('DOMContentLoaded', function() {
     const activationInputGroup = document.getElementById('activationInputGroup');
     
     // Элементы авторизованного состояния
+    const deauthBtn = document.getElementById('deauthBtn');
     const scanBtn = document.getElementById('scanBtn');
     const rallyScanBtn = document.getElementById('rallyScanBtn');
     const statusMessage = document.getElementById('statusMessage');
     const statusIndicator = document.getElementById('statusIndicator');
     const autoScanToggle = document.getElementById('autoScanToggle');
     
-    const API_URL = 'http://127.0.0.1:8000';
-    const AUTH_API_URL = `${API_URL}/game/api/auth/key`;
-    const ATTACKS_API_URL = `${API_URL}/game/api/attacks`;
-    const RALLY_API_URL = `${API_URL}/game/api/rally-point`;
-    const VERIFY_API_URL = `${API_URL}/game/browser/verify`;
+    const API_URL = CONFIG.API_URL;
+    const AUTH_API_URL = `${API_URL}${CONFIG.AUTH_API_URL}`;
+    const ATTACKS_API_URL = `${API_URL}${CONFIG.ATTACKS_API_URL}`;
+    const RALLY_API_URL = `${API_URL}${CONFIG.RALLY_API_URL}`;
+    const VERIFY_API_URL = `${API_URL}${CONFIG.VERIFY_API_URL}`;
+    const SERVER_STATUS_URL = `${API_URL}${CONFIG.SERVER_STATUS_URL}`;
     
     let isScanning = false;
     let isRallyScanning = false;
@@ -33,6 +35,7 @@ document.addEventListener('DOMContentLoaded', function() {
     let isAuthorized = false;
     let isActivated = false;
     let currentTabId = null;
+    let isActivating = false; // Флаг для предотвращения race condition при активации
     
     // Функция переключения UI между состояниями
     function switchToUnauthState() {
@@ -163,27 +166,17 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     }
     
-    // Проверка статуса активации (только локальная)
+    // Проверка статуса активации (только chrome.storage.local)
     async function checkActivationStatus() {
         if (!currentPlayerAccountId || !currentServer) {
             return false;
         }
         
         try {
-            const tab = await getActiveTab();
-            const result = await chrome.scripting.executeScript({
-                target: { tabId: tab.id },
-                func: (playerName, serverUrl) => {
-                    const activatedKey = `activated_${serverUrl}_${playerName}`;
-                    const isActivated = localStorage.getItem(activatedKey) === 'true';
-                    console.log('[Content] checkActivationStatus:', playerName, serverUrl, isActivated);
-                    return isActivated;
-                },
-                args: [currentPlayerName, currentServer]
-            });
-            
-            return result[0]?.result || false;
-            
+            // Используем только chrome.storage.local
+            const storageKey = `activation_${currentServer}_${currentPlayerName}`;
+            const result = await chrome.storage.local.get([storageKey]);
+            return result[storageKey] === true;
         } catch (error) {
             console.error('Error checking activation status:', error);
             return false;
@@ -204,26 +197,45 @@ document.addEventListener('DOMContentLoaded', function() {
         
         playerInfo.innerHTML = `<span>🎮 ${escapeHtml(currentPlayerName)}</span> (ID: ${currentPlayerAccountId})`;
         
-        const isActivatedLocal = await checkActivationStatus();
+        // Проверяем статус на сервере
+        let isActuallyVerified = false;
+        try {
+            const fullServerUrl = `https://${currentServer}/`;
+            const statusUrl = `${SERVER_STATUS_URL}?player_name=${encodeURIComponent(currentPlayerName)}&server_url=${encodeURIComponent(fullServerUrl)}`;
+            const response = await fetch(statusUrl);
+            if (response.ok) {
+                const data = await response.json();
+                isActuallyVerified = data.is_verified === true;
+                console.log('[Popup] Server verification status:', isActuallyVerified);
+                
+                // Сохраняем статус в chrome.storage.local
+                if (isActuallyVerified) {
+                    const storageKey = `activation_${currentServer}_${currentPlayerName}`;
+                    await chrome.storage.local.set({ [storageKey]: true });
+                }
+            }
+        } catch (error) {
+            console.error('[Popup] Error checking server status:', error);
+            // Если сервер не ответил, используем локальный статус
+            isActuallyVerified = await checkActivationStatus();
+        }
         
-        console.log('[Popup] updateActivationUI - isActivatedLocal:', isActivatedLocal);
+        console.log('[Popup] updateActivationUI - isActuallyVerified:', isActuallyVerified);
         
-        if (isActivatedLocal) {
+        if (isActuallyVerified) {
             activationInputGroup.style.display = 'none';
             activatedBadge.style.display = 'flex';
             isActivated = true;
             
-            // Если уже активирован, но ключа нет — запросим ключ
+            // Если уже активирован, но ключа нет — запросим ключ (silent mode)
             const savedKey = await checkSavedKey(currentServer, currentPlayerName);
             if (!savedKey || !savedKey.key) {
                 console.log('[Popup] Activated but no key, requesting...');
-                const authorized = await requestAuthKey(currentServer, currentPlayerName);
+                const authorized = await requestAuthKey(currentServer, currentPlayerName, true);
                 if (authorized) {
-                    // Переключаемся на авторизованное состояние
                     switchToAuthState();
                 }
             } else {
-                // Уже есть ключ, переключаемся
                 authKey = savedKey.key;
                 isAuthorized = true;
                 switchToAuthState();
@@ -232,21 +244,22 @@ document.addEventListener('DOMContentLoaded', function() {
             activationInputGroup.style.display = 'flex';
             activatedBadge.style.display = 'none';
             isActivated = false;
-            // Показываем состояние активации
             switchToUnauthState();
         }
     }
     
     // Отправка запроса на активацию
     async function sendActivationRequest() {
-        const
-        code = verificationCodeInput.value.trim().toUpperCase();
+        // Предотвращаем параллельные активации
+        if (isActivating) {
+            console.log('[Popup] Activation already in progress, skipping');
+            return;
+        }
+        
+        const code = verificationCodeInput.value.trim().toUpperCase();
         
         console.log('[Popup] === sendActivationRequest START ===');
         console.log('[Popup] Code entered:', code ? `${code.substring(0, 2)}***` : 'EMPTY');
-        console.log('[Popup] currentPlayerAccountId:', currentPlayerAccountId);
-        console.log('[Popup] currentServer:', currentServer);
-        console.log('[Popup] currentPlayerName:', currentPlayerName);
         
         if (!code) {
             showActivationMessage('Введите код подтверждения', 'warning');
@@ -263,6 +276,7 @@ document.addEventListener('DOMContentLoaded', function() {
             return;
         }
         
+        isActivating = true;
         activateBtn.disabled = true;
         activateBtn.textContent = 'Проверка...';
         
@@ -270,12 +284,6 @@ document.addEventListener('DOMContentLoaded', function() {
             const fullServerUrl = `https://${currentServer}/`;
             
             console.log('[Popup] Sending verification request...');
-            console.log('[Popup] VERIFY_API_URL:', VERIFY_API_URL);
-            console.log('[Popup] Request body:', {
-                verification_code: code,
-                player_account_id: currentPlayerAccountId,
-                server_url: fullServerUrl
-            });
             
             const response = await fetch(VERIFY_API_URL, {
                 method: 'POST',
@@ -289,9 +297,6 @@ document.addEventListener('DOMContentLoaded', function() {
                 })
             });
             
-            console.log('[Popup] Response status:', response.status, response.statusText);
-            
-            // Получаем текст ответа для отладки
             const responseText = await response.text();
             console.log('[Popup] Response text:', responseText);
             
@@ -303,65 +308,51 @@ document.addEventListener('DOMContentLoaded', function() {
                 data = { success: false, message: 'Invalid server response' };
             }
             
-            console.log('[Popup] Parsed response data:', data);
-            
             if (response.ok && data.success) {
                 console.log('[Popup] ✅ Activation SUCCESS!');
                 showActivationMessage('✅ Аккаунт подтверждён!', 'success');
                 
-                // Сохраняем API-ключ
+                // Сохраняем статус активации в chrome.storage.local
+                const storageKey = `activation_${currentServer}_${currentPlayerName}`;
+                await chrome.storage.local.set({ [storageKey]: true });
+                isActivated = true;
+                
+                // Сохраняем API-ключ и переключаемся на авторизованное состояние
                 if (data.api_key) {
-                    console.log('[Popup] Saving API key:', data.api_key.substring(0, 10) + '...');
                     await saveKey(currentServer, currentPlayerName, data.api_key);
                     authKey = data.api_key;
                     isAuthorized = true;
-                    console.log('[Popup] ✅ API key saved');
+                    
+                    // Переключаемся на авторизованное состояние
+                    switchToAuthState();
+                    
+                    // Обновляем UI
+                    activationInputGroup.style.display = 'none';
+                    activatedBadge.style.display = 'flex';
+                    
+                    // Очищаем поле ввода
+                    verificationCodeInput.value = '';
+                    
+                    // Закрываем окно через 2 секунды
+                    setTimeout(() => {
+                        window.close();
+                    }, 2000);
                 } else {
-                    console.log('[Popup] ⚠️ No api_key in response! Response:', data);
-                    showActivationMessage('⚠️ Ключ не получен, но аккаунт подтверждён', 'warning');
+                    // Ключ не получен, но активация прошла — запрашиваем ключ
+                    console.log('[Popup] Activation success but no api_key, requesting key...');
+                    const authorized = await requestAuthKey(currentServer, currentPlayerName, false);
+                    if (authorized) {
+                        switchToAuthState();
+                        setTimeout(() => {
+                            window.close();
+                        }, 2000);
+                    } else {
+                        showActivationMessage('✅ Аккаунт подтверждён, но ключ не получен. Откройте popup снова.', 'warning');
+                    }
                 }
                 
-                // Сохраняем статус активации в localStorage страницы
-                console.log('[Popup] Saving activation to localStorage...');
-                const tab = await getActiveTab();
-                console.log('[Popup] Active tab id:', tab.id);
-                
-                await chrome.scripting.executeScript({
-                    target: { tabId: tab.id },
-                    func: (playerName, serverUrl) => {
-                        const activatedKey = `activated_${serverUrl}_${playerName}`;
-                        localStorage.setItem(activatedKey, 'true');
-                        console.log('[Content] ✅ Saved activation to localStorage:', activatedKey);
-                        return true;
-                    },
-                    args: [currentPlayerName, currentServer]
-                });
-                
-                console.log('[Popup] Updating UI...');
-                
-                // Переключаемся на авторизованное состояние
-                switchToAuthState();
-                
-                // Обновляем UI
-                activationInputGroup.style.display = 'none';
-                activatedBadge.style.display = 'flex';
-                isActivated = true;
-                
-                // Обновляем статус авторизации
-                setStatus(STATUS.GREEN, 'Authorized');
-                scanBtn.disabled = false;
-                rallyScanBtn.disabled = false;
-                
-                // Очищаем поле ввода
-                verificationCodeInput.value = '';
-                
-                // Закрываем окно через 2 секунды
-                setTimeout(() => {
-                    window.close();
-                }, 2000);
-                
             } else {
-                console.log('[Popup] ❌ Activation FAILED:', data.message || 'Unknown error');
+                console.log('[Popup] ❌ Activation FAILED:', data.message);
                 showActivationMessage(data.message || '❌ Неверный код подтверждения', 'error');
                 verificationCodeInput.value = '';
                 verificationCodeInput.focus();
@@ -369,11 +360,10 @@ document.addEventListener('DOMContentLoaded', function() {
             
         } catch (error) {
             console.error('[Popup] ❌ Activation error:', error);
-            console.error('[Popup] Error name:', error.name);
-            console.error('[Popup] Error message:', error.message);
             showActivationMessage('❌ Ошибка подключения к серверу', 'error');
         } finally {
             console.log('[Popup] === sendActivationRequest END ===');
+            isActivating = false;
             activateBtn.disabled = false;
             activateBtn.textContent = 'Подтвердить';
         }
@@ -470,8 +460,10 @@ document.addEventListener('DOMContentLoaded', function() {
     }
     
     // Запросить ключ с сервера
-    async function requestAuthKey(server, playerName) {
-        setStatus(STATUS.YELLOW, 'Requesting access...');
+    async function requestAuthKey(server, playerName, silent = false) {
+        if (!silent) {
+            setStatus(STATUS.YELLOW, 'Requesting access...');
+        }
         
         try {
             const response = await fetch(AUTH_API_URL, {
@@ -491,25 +483,35 @@ document.addEventListener('DOMContentLoaded', function() {
             }
             
             const result = await response.json();
+            console.log('[Popup] requestAuthKey result:', result);
             
             if (result.status === 'confirmed' && result.key) {
                 await saveKey(server, playerName, result.key);
                 authKey = result.key;
                 isAuthorized = true;
                 
-                setStatus(STATUS.GREEN, 'Access granted');
+                if (!silent) {
+                    setStatus(STATUS.GREEN, 'Access granted');
+                }
                 return true;
             } else if (result.status === 'denied') {
-                setStatus(STATUS.RED, 'Access denied');
+                console.log('[Popup] Auth key request denied');
+                if (!silent) {
+                    setStatus(STATUS.RED, 'Access denied');
+                }
                 return false;
             } else {
-                setStatus(STATUS.RED, 'Invalid response');
+                if (!silent) {
+                    setStatus(STATUS.RED, 'Invalid response');
+                }
                 return false;
             }
             
         } catch (error) {
             console.error('Auth request error:', error);
-            setStatus(STATUS.RED, 'Auth server error');
+            if (!silent) {
+                setStatus(STATUS.RED, 'Auth server error');
+            }
             return false;
         }
     }
@@ -566,12 +568,15 @@ document.addEventListener('DOMContentLoaded', function() {
         console.log('[Popup] checkAuthorization - isActivated:', isActivated);
         
         if (isActivated) {
-            // Запрашиваем ключ
-            const authorized = await requestAuthKey(currentServer, currentPlayerName);
+            // Игрок активирован, но ключ не найден — пробуем запросить ключ (silent mode)
+            console.log('[Popup] Player activated but no key found, trying to request key...');
+            const authorized = await requestAuthKey(currentServer, currentPlayerName, true);
             if (authorized) {
                 switchToAuthState();
                 return true;
             }
+            // Если запрос ключа не удался, показываем форму активации
+            console.log('[Popup] Key request failed, showing activation form');
         }
         
         // Не авторизован — показываем форму активации
@@ -633,7 +638,7 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     }
     
-    // Парсинг данных атак из ответа API
+    // Парсинг данных атак из ответа API с использованием словаря из CONFIG
     function parseAttackData(apiData) {
         console.log('Parsing attack data:', apiData);
         
@@ -644,23 +649,51 @@ document.addEventListener('DOMContentLoaded', function() {
             const text = apiData.text.toLowerCase();
             console.log('Text to parse:', text);
             
-            // Парсим "Incoming attacks: 3, Incoming raids: 2"
-            const attackMatch = text.match(/attacks?:\s*(\d+)/);
-            const raidMatch = text.match(/raids?:\s*(\d+)/);
+            // Словарь ключевых слов для парсинга из CONFIG
+            const keywords = CONFIG.ATTACK_TYPE_KEYWORDS;
             
-            console.log('Attack match:', attackMatch);
-            console.log('Raid match:', raidMatch);
+            // Ищем совпадения для каждого типа атаки
+            let attackFound = false;
+            let raidFound = false;
             
-            if (attackMatch) attacks = parseInt(attackMatch[1]);
-            if (raidMatch) raids = parseInt(raidMatch[1]);
+            // Проверяем каждое ключевое слово для атак
+            for (const keyword of keywords.attack) {
+                const regex = new RegExp(keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ':\\s*(\\d+)', 'i');
+                const match = text.match(regex);
+                if (match) {
+                    attacks = parseInt(match[1]);
+                    attackFound = true;
+                    console.log(`Attack found with keyword "${keyword}":`, attacks);
+                    break;
+                }
+            }
             
-            // Альтернативный формат: "Incoming raids: 14"
-            if (!attackMatch && !raidMatch) {
+            // Проверяем каждое ключевое слово для набегов
+            for (const keyword of keywords.raid) {
+                const regex = new RegExp(keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ':\\s*(\\d+)', 'i');
+                const match = text.match(regex);
+                if (match) {
+                    raids = parseInt(match[1]);
+                    raidFound = true;
+                    console.log(`Raid found with keyword "${keyword}":`, raids);
+                    break;
+                }
+            }
+            
+            // Альтернативный формат: если не нашли по ключевым словам, ищем число
+            if (!attackFound && !raidFound) {
                 const totalMatch = text.match(/\d+/);
                 if (totalMatch) {
-                    if (text.includes('raid')) {
+                    // Определяем тип по наличию ключевых слов в тексте
+                    const hasRaidKeyword = keywords.raid.some(kw => text.includes(kw));
+                    const hasAttackKeyword = keywords.attack.some(kw => text.includes(kw));
+                    
+                    if (hasRaidKeyword) {
                         raids = parseInt(totalMatch[0]);
+                    } else if (hasAttackKeyword) {
+                        attacks = parseInt(totalMatch[0]);
                     } else {
+                        // По умолчанию считаем атакой
                         attacks = parseInt(totalMatch[0]);
                     }
                 }
@@ -845,13 +878,24 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     }
     
+    // Вспомогательная функция для кодирования UTF-8 в base64
+    function encodePlayerName(playerName) {
+        // Правильное кодирование UTF-8 в base64
+        const utf8Bytes = new TextEncoder().encode(playerName);
+        let binary = '';
+        for (let i = 0; i < utf8Bytes.length; i++) {
+            binary += String.fromCharCode(utf8Bytes[i]);
+        }
+        return btoa(binary);
+    }
+    
     // Отправить данные с авторизацией
     async function sendDataWithAuth(url, data) {
         if (!authKey) {
             throw new Error('No auth key');
         }
-		
-		const encodedPlayerName = btoa(encodeURIComponent(currentPlayerName));
+        
+        const encodedPlayerName = encodePlayerName(currentPlayerName);
         
         console.log('Sending data to:', url);
         console.log('Auth key present:', !!authKey);
@@ -867,7 +911,7 @@ document.addEventListener('DOMContentLoaded', function() {
             headers: {
                 'Content-Type': 'application/json',
                 'X-Auth-Key': authKey,
-                'X-Server': currentServer,
+                'X-Server': `https://${currentServer}/`,
                 'X-Player-Name': encodedPlayerName
             },
             body: JSON.stringify(data)
@@ -878,12 +922,21 @@ document.addEventListener('DOMContentLoaded', function() {
         
         if (response.status === 401) {
             // Неавторизован, удаляем ключ
-            await removeKey(currentServer, encodedPlayerName);
+            await removeKey(currentServer, currentPlayerName);
             isAuthorized = false;
             authKey = '';
             setStatus(STATUS.RED, 'Session expired');
             scanBtn.disabled = true;
             rallyScanBtn.disabled = true;
+            
+            // Переключаем UI на состояние активации
+            await updateActivationUI();  // Обновляем UI активации
+            switchToUnauthState();       // Переключаем на неавторизованное состояние
+            
+            // Останавливаем автосканирование если было включено
+            autoScanToggle.checked = false;
+            saveSettings();
+            
             throw new Error('Unauthorized');
         }
         
@@ -1076,7 +1129,7 @@ document.addEventListener('DOMContentLoaded', function() {
                                 },
                                 troops: troops,
                                 account: {
-                                    server: currentServer,
+                                    server: `https://${currentServer}/`,
                                     player_name: currentPlayerName
                                 }
                             });
@@ -1151,7 +1204,7 @@ document.addEventListener('DOMContentLoaded', function() {
                         type: 'village',
                         data: villageData,
                         metadata: {
-                            server: currentServer,
+                            server: `https://${currentServer}/`,
                             player: currentPlayerName,
                             source: 'manual_scan',
                             page: tab.url
@@ -1173,7 +1226,7 @@ document.addEventListener('DOMContentLoaded', function() {
                         type: 'alliance',
                         data: allianceData,
                         metadata: {
-                            server: currentServer,
+                            server: `https://${currentServer}/`,
                             player: currentPlayerName,
                             source: 'manual_scan',
                             page: tab.url
@@ -1269,7 +1322,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     type: 'rally_point',
                     movement_info: scanResult.movement_info,
                     metadata: {
-                        server: currentServer,
+                        server: `https://${currentServer}/`,
                         player: currentPlayerName,
                         source: 'manual_scan',
                         page: tab.url,
@@ -1352,10 +1405,7 @@ document.addEventListener('DOMContentLoaded', function() {
         currentPlayerName = playerInfoData.playerName;
         currentPlayerAccountId = playerInfoData.playerAccountId;
         
-        // Обновляем UI активации
-        await updateActivationUI();
-        
-        // Проверяем авторизацию
+        // Единая точка проверки авторизации
         await checkAuthorization();
         
         const settings = await chrome.storage.local.get(['autoScan']);
@@ -1363,6 +1413,22 @@ document.addEventListener('DOMContentLoaded', function() {
             setStatus(STATUS.GREEN, 'Auto-scan enabled');
         }
     }
+    
+    // Обработчик кнопки разавторизации
+    deauthBtn.addEventListener('click', async () => {
+        console.log('[Popup] Deauth clicked - currentServer:', currentServer, 'currentPlayerName:', currentPlayerName);
+        if (currentServer && currentPlayerName) {
+            const removed = await removeKey(currentServer, currentPlayerName);
+            console.log('[Popup] Key removed:', removed);
+            // Проверим, что ключ действительно удалён
+            const savedKey = await checkSavedKey(currentServer, currentPlayerName);
+            console.log('[Popup] Key after removal:', savedKey);
+        }
+        authKey = '';
+        isAuthorized = false;
+        switchToUnauthState();
+        await updateActivationUI();
+    });
     
     // Обработчики событий
     scanBtn.addEventListener('click', scanAndSend);
@@ -1390,6 +1456,12 @@ document.addEventListener('DOMContentLoaded', function() {
     });
     
     window.addEventListener('focus', async () => {
+        // Предотвращаем конфликт с активацией
+        if (isActivating) {
+            console.log('[Popup] Activation in progress, skipping focus check');
+            return;
+        }
+        
         const tab = await getActiveTab();
         const isTravianPage = tab.url && tab.url.includes('travian.com');
         
@@ -1399,7 +1471,17 @@ document.addEventListener('DOMContentLoaded', function() {
             return;
         }
         
-        if (currentServer) {
+        // Обновляем информацию об игроке
+        const playerInfoData = await getPlayerInfoFromPage();
+        const serverChanged = currentServer !== playerInfoData.server;
+        const playerChanged = currentPlayerName !== playerInfoData.playerName;
+        
+        if (serverChanged || playerChanged) {
+            currentServer = playerInfoData.server;
+            currentPlayerName = playerInfoData.playerName;
+            currentPlayerAccountId = playerInfoData.playerAccountId;
+            await checkAuthorization();
+        } else if (!isAuthorized) {
             await checkAuthorization();
         }
     });

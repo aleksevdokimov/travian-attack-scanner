@@ -153,6 +153,46 @@
             margin: 8px 0;
         }
         
+        /* Контейнер для статуса и кнопки разавторизации */
+        .status-container {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            width: 100%;
+        }
+        
+        /* Кнопка разавторизации */
+        .deauth-btn {
+            width: 16px;
+            height: 16px;
+            min-width: 16px;
+            padding: 0;
+            background: rgba(239, 68, 68, 0.1);
+            border: 1px solid rgba(239, 68, 68, 0.3);
+            border-radius: 4px;
+            color: #ef4444;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 10px;
+            line-height: 1;
+            transition: all 0.2s;
+        }
+        
+        .deauth-btn:hover {
+            background: rgba(239, 68, 68, 0.2);
+            border-color: rgba(239, 68, 68, 0.5);
+        }
+        
+        /* Разделитель между статусом и кнопками сканирования */
+        .scan-separator {
+            height: 1px;
+            background: #374151;
+            margin: 8px 0;
+            width: 100%;
+        }
+        
         /* Остальные стили из предыдущей версии */
         .header {
             display: flex;
@@ -383,12 +423,17 @@
         
         <!-- Состояние 2: Авторизован (показываем сканеры) -->
         <div id="authState" class="state-container" style="display: none;">
-            <div class="header">
-            <div id="statusMessage" class="status-message">
-                Initializing...
+            <!-- Контейнер для статуса и кнопки разавторизации -->
+            <div class="status-container">
+                <button id="deauthBtn" class="deauth-btn" title="Выйти из аккаунта">✕</button>
+                <div id="statusMessage" class="status-message">
+                    Initializing...
+                </div>
+                <div class="status-indicator" id="statusIndicator"></div>
             </div>
-            <div class="status-indicator" id="statusIndicator"></div>
-        </div>
+            
+            <!-- Разделитель между статусом и кнопками -->
+            <div class="scan-separator"></div>
         
         <div class="controls-row">
             <div class="buttons-container">
@@ -413,6 +458,7 @@
         </div>
     </div>
     
+    <script src="config.js"></script>
     <script src="popup.js"></script>
 </body>
 </html>

@@ -215,7 +215,7 @@ async function sendAttackData(attackData) {
 		try {
 			debugLog(`sendAttackData: Sending ${attackData.villages.length} villages...`);
 			
-			const villageResponse = await fetch(`${API_URL}/api/attacks`, {
+			const villageResponse = await fetch(`${API_URL}/game/api/attacks`, {
 				method: 'POST',
 				headers: headers,
 				body: JSON.stringify(villagePayload)
@@ -234,6 +234,17 @@ async function sendAttackData(attackData) {
 					if (villageResponse.status === 401) {
 						debugLog('sendAttackData: Authorization error, removing key...');
 						await removeAuthKey(attackData.server, attackData.playerName);
+						
+						// Отключаем автосканирование
+						try {
+							const currentSettings = await chrome.storage.local.get(['autoScan']);
+							if (currentSettings.autoScan) {
+								await chrome.storage.local.set({ autoScan: false });
+								console.log('[Background] Auto-scan disabled due to invalid auth key');
+							}
+						} catch (e) {
+							debugLog('Failed to disable auto-scan:', e);
+						}
 					}
 				}
 		} catch (error) {
@@ -265,7 +276,7 @@ async function sendAttackData(attackData) {
 		try {		
 			debugLog(`sendAttackData: Sending ${attackData.alliance.length} alliance members...`);
 				
-			const allianceResponse = await fetch(`${API_URL}/api/attacks`, {
+			const allianceResponse = await fetch(`${API_URL}/game/api/attacks`, {
 				method: 'POST',
 				headers: headers,
 				body: JSON.stringify(alliancePayload)
@@ -297,9 +308,18 @@ async function sendAttackData(attackData) {
 // Вспомогательная функция для удаления ключа авторизации
 async function removeAuthKey(server, playerName) {
     try {
+        // Извлекаем hostname из полного URL (например, "https://tsx1.travian.com/" → "tsx1.travian.com")
+        let serverHost = server;
+        try {
+            const url = new URL(server);
+            serverHost = url.hostname;
+        } catch (e) {
+            // Если не URL, используем как есть
+        }
+        
         const saved = await chrome.storage.local.get(['auth_keys']);
         const authKeys = saved.auth_keys || {};
-        const serverKey = `${server}_${playerName}`;
+        const serverKey = `${serverHost}_${playerName}`;
         
         if (authKeys[serverKey]) {
             delete authKeys[serverKey];

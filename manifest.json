@@ -24,7 +24,7 @@
   "content_scripts": [
     {
       "matches": ["https://*.travian.com/*"],
-      "js": ["content.js"],
+      "js": ["config.js", "content.js"],
       "run_at": "document_idle"
     }
   ]

@@ -147,7 +147,7 @@ if (window.location.href.includes('travian.com')) {
                         villages: villageData,
                         alliance: allianceData,
                         timestamp: new Date().toISOString(),
-                        server: server,
+                        server: `https://${server}/`,
                         playerName: playerName,
                         authKey: authKey.key,
                         page: window.location.href
@@ -168,6 +168,11 @@ if (window.location.href.includes('travian.com')) {
                 console.log('[Travian Scanner] Auto-scan data sent successfully');
             } else if (response && response.reason === 'too_frequent') {
                 console.log('[Travian Scanner] Auto-scan skipped: too frequent');
+            } else if (response && response.success === false && response.error === 'Unauthorized') {
+                console.log('[Travian Scanner] Auth key invalid, disabling auto-scan');
+                await chrome.storage.local.set({ autoScan: false });
+                autoScanEnabled = false;
+                stopPeriodicAutoScan();
             } else {
                 console.log('[Travian Scanner] Failed to send auto-scan data');
             }
@@ -177,7 +182,7 @@ if (window.location.href.includes('travian.com')) {
         }
     }
     
-    // Парсинг данных атак из ответа API
+    // Парсинг данных атак из ответа API с использованием словаря из CONFIG
     function parseAttackData(apiData) {
         console.log('Parsing attack data:', apiData);
         
@@ -188,23 +193,51 @@ if (window.location.href.includes('travian.com')) {
             const text = apiData.text.toLowerCase();
             console.log('Text to parse:', text);
             
-            // Парсим "Incoming attacks: 3, Incoming raids: 2"
-            const attackMatch = text.match(/attacks?:\s*(\d+)/);
-            const raidMatch = text.match(/raids?:\s*(\d+)/);
+            // Словарь ключевых слов для парсинга из CONFIG
+            const keywords = CONFIG.ATTACK_TYPE_KEYWORDS;
             
-            console.log('Attack match:', attackMatch);
-            console.log('Raid match:', raidMatch);
+            // Ищем совпадения для каждого типа атаки
+            let attackFound = false;
+            let raidFound = false;
             
-            if (attackMatch) attacks = parseInt(attackMatch[1]);
-            if (raidMatch) raids = parseInt(raidMatch[1]);
+            // Проверяем каждое ключевое слово для атак
+            for (const keyword of keywords.attack) {
+                const regex = new RegExp(keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ':\\s*(\\d+)', 'i');
+                const match = text.match(regex);
+                if (match) {
+                    attacks = parseInt(match[1]);
+                    attackFound = true;
+                    console.log(`Attack found with keyword "${keyword}":`, attacks);
+                    break;
+                }
+            }
             
-            // Альтернативный формат: "Incoming raids: 14"
-            if (!attackMatch && !raidMatch) {
+            // Проверяем каждое ключевое слово для набегов
+            for (const keyword of keywords.raid) {
+                const regex = new RegExp(keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ':\\s*(\\d+)', 'i');
+                const match = text.match(regex);
+                if (match) {
+                    raids = parseInt(match[1]);
+                    raidFound = true;
+                    console.log(`Raid found with keyword "${keyword}":`, raids);
+                    break;
+                }
+            }
+            
+            // Альтернативный формат: если не нашли по ключевым словам, ищем число
+            if (!attackFound && !raidFound) {
                 const totalMatch = text.match(/\d+/);
                 if (totalMatch) {
-                    if (text.includes('raid')) {
+                    // Определяем тип по наличию ключевых слов в тексте
+                    const hasRaidKeyword = keywords.raid.some(kw => text.includes(kw));
+                    const hasAttackKeyword = keywords.attack.some(kw => text.includes(kw));
+                    
+                    if (hasRaidKeyword) {
                         raids = parseInt(totalMatch[0]);
+                    } else if (hasAttackKeyword) {
+                        attacks = parseInt(totalMatch[0]);
                     } else {
+                        // По умолчанию считаем атакой
                         attacks = parseInt(totalMatch[0]);
                     }
                 }
